@@ -1,0 +1,324 @@
+# AUTHOR:    David Bennehag    (David.Bennehag@Gmail.com)
+# VERSION:    2.0
+#
+#    DISTRIBUTED SYSTEMS (MPCSN, Chalmers University of Technology)
+#
+#    Changes from V1.0:
+#    * The distribution of messages is now centralized. All nodes send their updates
+#      to an elected leader who will broadcast the updates on their behalf.
+#
+#    * Locks have been implemented to ensure safety of critical sections (mutual exclusion)
+#      
+#    * Made the info-reporting optional with the flag mycontext['reporting']
+#
+#    * Removed pagecounts 
+#
+#    TODO: 
+#    
+
+### A function that will be called after the initialization and before 
+### the message passing begins, and then subsequently called upon each reception
+### of an election-message. Will ultimately lead to all nodes agreeing upon one node as leader.
+### INPUT: The message from the previous node, upon which we'll add our own information.
+### OUTPUT: No return value.
+def leaderElection(message):
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Entered function leaderElection()***"
+    
+    #Find our index in the ring
+    myIndex = mycontext['addresses'].index(mycontext['vesselAddress'])
+    
+    #Check to see so we haven't gone full circle and try to contact ourselves
+    if len(message.split(':')) <= len(mycontext['addresses']):
+        
+        #Leader election process is initiating, create the first message
+        if message == '':
+            #Start building the election message
+            message += str(mycontext['vesselAddress']) + "," + str(mycontext['vesselID']) 
+        else:
+            #Leader election is underway, continue building the election message
+            
+            previous = message.split(':').pop()
+            previousID = previous.split(',').pop()
+            previousAddress = previous.split(',')
+            
+            #Check to see if our ID's are equal
+            if previousID == str(mycontext['vesselID']):
+                #We have the same ID as the previous node, check IP
+                if mycontext['reporting']:
+                    print "Warning, two IDs are equal, checking IP's"
+                
+                #Convert the IP-address to an integer               
+                myaddress = int(mycontext['vesselAddress'].replace('.', ''))
+                
+                #If previous nodes address is bigger, send out his address and ID instead.
+                if int(previousAddress.replace('.', '')) >= myaddress:
+                    message += ":" + previousAddress + "," + str(previousID)
+                else:
+                    #Otherwise, send our info                    
+                    message += ":" + str(mycontext['vesselAddress']) + "," + str(mycontext['vesselID'])
+            else:
+                #Our ID's are different, send our info
+                message += ":" + str(mycontext['vesselAddress']) + "," + str(mycontext['vesselID'])
+        
+        #Vessel is not last in the ring
+        if myIndex != len(mycontext['addresses']) - 1:
+            address = mycontext['addresses'][myIndex+1]
+            newConn = openconn(address, mycontext['port'])
+            if mycontext['reporting']:
+                print "connection to " + address + ":" + str(mycontext['port']) + " successful"
+            newConn.send(message)
+            if mycontext['reporting']:
+                print "send successful"
+            newConn.close()
+                
+        #Vessel is last in the ring
+        else:
+                        
+            #print "I'm last"
+            address = mycontext['addresses'][0]
+            
+            newConn = openconn(address, mycontext['port'])
+            if mycontext['reporting']:
+                print "connection to " + address + ":" + str(mycontext['port']) + " successful"
+            newConn.send(message)
+            if mycontext['reporting']:
+                print "send successful"
+            newConn.close()
+    else:
+        mycontext['lock'].acquire()
+        
+        candidates = message.split(':')
+        
+        for candidate in candidates:
+            #print candidate
+            if candidate.split(',')[1] != '':
+                if int(candidate.split(',')[1]) > mycontext['leaderID']:
+                    mycontext['leaderID'] = int(candidate.split(',')[1])
+                    mycontext['leaderAddress'] = candidate.split(',')[0] 
+                    if mycontext['reporting']:
+                        print "Found new leader: " + str(mycontext['leaderID']) + " : " + mycontext['leaderAddress'] 
+        
+        mycontext['lock'].release()
+    
+    if mycontext['reporting']:    
+        print "At <" + str(getruntime()) + "> ***Finished function leaderElection()***\n\n"
+        
+### END OF FUNCTION leaderElection ###
+
+### A function that receives the information to show and
+### then builds the HTML to send back to the browser.
+### INPUT: All the info to be added to the HTML, including the message itself
+### OUTPUT: the HTML string to send
+def buildHTML(leaderAddress, leaderID, vesselID, message):
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Entered function buildHTML()***"
+    
+    if leaderID == 0:
+        leaderString = """OUR LEADER HAS NOT BEEN CHOSEN YET"""
+    else:    
+        leaderString = "OUR LEADER'S IP: [" + leaderAddress + "], (his ID: " + str(leaderID) + ")"
+    
+    newMessage = """
+        <html>
+        <head>
+            <meta content="text/html; charset=utf-8" http-equiv="content-type">
+            <title>Blackboard, the greatest</title>
+            <style>
+            body{background-color:teal; font-family: "Comic Sans MS", "Comic Sans", cursive;}
+            
+            </style>
+        </head>
+        <body>
+            <h2> THE Blackboard (your IP: [""" + str(mycontext['vesselAddress']) + """], your ID: """ + vesselID + """)</h2>
+            <h2> """ + leaderString + """ </h2>
+            <h3> Local runtimes   &   corresponding sender </h3>
+              <p>""" + message + """</p>
+            <br>
+            <textarea rows="4" cols="50" name="comment" form="usrform"></textarea>
+            <form action="" id="usrform" method="post">
+                <input type="submit">                
+            </form>
+        </body>
+        </html>"""
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Finished function buildHTML()\n\n***"
+        
+    return newMessage
+    
+### END OF FUNCTION buildHTML ###        
+        
+### The primary building block of the program. 
+### Is called every time a TCP connection is made to the local IP and port.
+### It will look at the header and perform different actions depending on what kind of
+### message we received.
+def main(ip, port, sockobj, thiscommhandle, listencommhandle):
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Entered function main()***"
+    
+    #Keep track of pagecount
+    #mycontext['pagecount'] = mycontext['pagecount'] + 1
+    
+    #httpHeader will contain the string we received in the message coming on the recently established connection
+    httpHeader = ""
+    
+    try:
+        # Receive the message
+        httpHeader = sockobj.recv(4096)
+    except:
+        print "Problem with socket"  
+    
+    # React differently depending on the message type: HTTP GET or POST, or some other type of communication.
+    if httpHeader.startswith( 'GET' ):
+        
+        #Pass the message and the pagecount to a function that builds the HTML for us, defined above
+        htmlResponse = buildHTML(mycontext['leaderAddress'], mycontext['leaderID'], str(mycontext['vesselID']), mycontext['message'])
+    
+        #Send to the client, the HTML that was requested
+        sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+        "Content-length: %i\r\n\r\n%s" % (len(htmlResponse), htmlResponse))
+        sockobj.close()
+        
+    elif httpHeader.startswith( 'POST' ):
+        
+        
+        #Prevent the user from just printing empty lines by checking that the message is not empty
+        if httpHeader.split('comment=').pop() != "":
+            MsgToSend = ""
+            
+            #Add a tag to the start of each new message to easily identify it later
+            MsgToSend += "<StartOfMsg>"
+            
+            #Add some control data to each message
+            MsgToSend += "<msg><" + str(round(getruntime(), 3)) + "> [" + str(mycontext['vesselAddress']) + "] said:\t "
+            
+            #Get the message contained in the header. Split the long string when we find the comment,
+            # and then take the second string in the resulting list, which is our message as the comment
+            # always comes last in the header
+            newMsg = httpHeader.split('comment=').pop()
+            #Implement a cleaning function instead
+            newMsg = newMsg.replace("+", " ")
+            newMsg = newMsg.replace("%0D", "")
+            newMsg = newMsg.replace("%0A", "")
+            MsgToSend += newMsg
+            
+            #Add a newline to prevent it all from ending up on one line in the html source code
+            MsgToSend += "\n"
+            
+            #Add a break-tag to get each message on a new line
+            MsgToSend += "<br />"   
+            
+        #Pass the message and the pagecount to a function that builds the HTML for us, defined above
+        htmlResponse = buildHTML(mycontext['leaderAddress'], mycontext['leaderID'], str(mycontext['vesselID']), mycontext['message']+MsgToSend)
+        
+        #Send to the client, the HTML that was updated
+        sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+        "Content-length: %i\r\n\r\n%s" % (len(htmlResponse), htmlResponse))    
+        #Close the socket after replying to browser
+        sockobj.close()
+        
+        #if mycontext['reporting']:
+        print "sending new message......\n"
+        print "message = " + MsgToSend
+        
+        #Send the update to the leader.
+        #Split() the entire message on each Start-of-Message-tag; the latest update will be
+        # retrieved with pop()
+        newConn = openconn(mycontext['leaderAddress'], mycontext['port'])
+        newConn.send("<updMsg>" + MsgToSend.split('<StartOfMsg>').pop())
+        newConn.close()
+        
+    #The leader received an update from one of the other vessels
+    elif httpHeader.startswith( '<updMsg>' ):
+        mycontext['lock'].acquire()
+        
+        print "\nI received message: " + httpHeader.replace("<updMsg>", "")
+        print "\nmy current global message: " + mycontext['message']
+        mycontext['message'] += httpHeader.replace("<updMsg>", "")     
+        print "\nMy updated global message: " + mycontext['message'] + "\n"
+        
+        print "============================================================\n\n"
+        #mycontext['addresses'] contains a list of all our IP-addresses
+        #We loop through it to connect to all vessels (ourselves excluded)
+        #Then send an update to each vessel
+        for address in mycontext['addresses']:            
+            if address != mycontext['vesselAddress']:
+                newConn = openconn(address, mycontext['port'])
+                newConn.send(mycontext['message'].split('<StartOfMsg>').pop())
+                newConn.close()
+            
+        mycontext['lock'].release()    
+            
+    elif httpHeader.startswith( '<msg>' ):
+        #Leader has sent us an update, use his message
+        mycontext['lock'].acquire()
+        mycontext['message'] = httpHeader
+        mycontext['lock'].release()
+        
+    #We received an election message
+    else:       
+        leaderElection(httpHeader)
+    
+    #We close the socket that was passed in
+    sockobj.close()
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Finished function main()\n\n***"
+        
+if callfunc == 'initialize':
+    #Set to false to disable reporting of runtimes and other info
+    mycontext['reporting'] = False
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***STARTING initialization***"
+    
+    #Create a lock to be used for Mutual Exclusion.
+    #Before altering global variables, we want to acquire() a lock.
+    mycontext['lock'] = getlock()
+    
+    #Initialize global variables
+    mycontext['message'] = ""
+    mycontext['leaderID'] = 0
+    mycontext['leaderAddress'] = ""
+    mycontext['vesselAddress'] = getmyip()
+    #Create a (hopefully) unique ID for each vessel, ranging between 0 and 999999.
+    mycontext['vesselID'] = int(randomfloat()*1000000)
+    
+    #Open() the file with IP-addresses, remember to close() when finished
+    ipFile = open('ipaddress.txt', 'r')
+    #We read() the file and split() the lines up into separate entries, returning a list of addresses
+    mycontext['addresses'] = ipFile.read().split()
+    ipFile.close()  
+    
+    if len(callargs) > 1:
+        raise Exception("Too many call arguments")
+    
+    # Running remotely (assuming that we pass input argument only remotely):
+    # whenever this vessel gets a connection on its IPaddress:Clearinghouseport it'll call function main
+    elif len(callargs) == 1:
+        mycontext['port'] = int(callargs[0])
+        ip = mycontext['vesselAddress']    
+        
+    # Running locally:
+    # whenever we get a connection on 127.0.0.1:12345 we'll call main
+    else:
+        port = 63165
+        ip = '127.0.0.1'
+    
+    #call function main() whenever we receive a TCP connection
+    waitforconn(mycontext['vesselAddress'], mycontext['port'], main)
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***FINISHED initialization***\n\n"
+    
+    #Wait for all vessels to get ready, some appear to be really slow...
+    sleep(5)
+    
+    #We begin the election, starting with an empty message.
+    leaderElection("")
+    
+    
+    
+
+        
+    

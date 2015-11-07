@@ -1,0 +1,130 @@
+### A function that simply takes the message to show, and the current pagecount,
+### It then builds the HTML to send back to the browser.
+### INPUT: the message string and the pagecount integer
+### OUTPUT: the HTML string to send
+def buildHTML(message, pagecount):
+	return """
+		<html>
+		<head>
+			<meta content="text/html; charset=utf-8" http-equiv="content-type">
+			<title>Blackboard, the greatest</title>
+			<style>
+			body{background-color:teal; font-family: "Comic Sans MS", "Comic Sans", cursive;}
+			
+			</style>
+		</head>
+		<body>
+			<h2> THE Blackboard (your ip: """ + str(getmyip()) + """)</h2>
+			<h3> Runtime   &   Sender </h3>
+  			<p>""" + str(mycontext['message']) + """</p>
+			<br>
+			<textarea rows="4" cols="50" name="comment" form="usrform"></textarea>
+			<form action="" id="usrform" method="post">
+				<input type="submit">
+				<p>You are visitor """ + str(mycontext['pagecount']) + """<p>
+			</form>
+		</body>
+		</html>"""
+		
+### END OF FUNCTION buildHTML ###		
+		
+def board(ip, port, sockobj, thiscommhandle, listencommhandle):
+
+	#Keep track of pagecount
+	mycontext['pagecount'] = mycontext['pagecount'] + 1
+	httpHeader = ""
+	try:
+		# Receive message
+		httpHeader = sockobj.recv(1024)
+	except:
+		print "Problem with socket"  
+		 
+	
+	# React depending on message type: HTTP GET or POST, or some other type of communication.
+	if httpHeader.startswith( 'GET' ):
+		
+		#Pass the message and the pagecount to a function that builds the HTML for us, defined above
+		htmlResponse = buildHTML(str(mycontext['message']), str(mycontext['pagecount']))
+    
+    	#Send to the client, the HTML that was requested
+		sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+		"Content-length: %i\r\n\r\n%s" % (len(htmlResponse), htmlResponse))
+
+		sockobj.close()
+		
+	elif httpHeader.startswith( 'POST' ):
+		
+		#Prevent the user from just printing empty lines by checking that the message is not empty
+		if httpHeader.split('comment=').pop() != "":
+		
+			#Add a tag to the start of each new message to easily identify it later
+			mycontext['message'] += "<StartOfMsg>"
+			
+			#Add some control data to each message
+			mycontext['message'] += "<" + str(round(getruntime(), 3)) + "> " + str(getmyip()) + ":\t "
+			
+			#Get the message contained in the header. Split the long string when we find the comment,
+			# and then take the second string in the resulting list, which is our message as the comment
+			# always comes last in the header
+			newMsg = httpHeader.split('comment=').pop()
+			newMsg = newMsg.replace("+", " ")
+			newMsg = newMsg.replace("%0D", "")
+			newMsg = newMsg.replace("%0A", "")
+			mycontext['message'] += newMsg
+			
+			#Add a newline to prevent it all from ending up on one line in the html source code
+			mycontext['message'] += "\n"
+			
+			#Add a break-tag to get each message on a new line
+			mycontext['message'] += "<br />"
+		
+		#Pass the message and the pagecount to a function that builds the HTML for us, defined above
+		htmlResponse = buildHTML(str(mycontext['message']), str(mycontext['pagecount']))
+		
+		#Send to the client, the HTML that was updated
+		sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+		"Content-length: %i\r\n\r\n%s" % (len(htmlResponse), htmlResponse))
+		
+		#mycontext['addresses'] contains a list of all our IP-addresses
+		#We loop through it to connect to all vessels (ourselves excluded)
+		#Then send an update to each vessel
+		for address in mycontext['addresses']:			
+			if address != getmyip():
+				print "sending update to: "
+				print address
+				newConn = openconn(address, 63165)
+				newConn.send(mycontext['message'].split('<StartOfMsg>').pop())
+				newConn.close()
+	else:
+		#We received an update from one of the other vessels
+		#Update our message
+		mycontext['message'] += httpHeader
+	
+	#We close the socket that was passed in
+	sockobj.close()  
+	
+if callfunc == 'initialize':
+	mycontext['pagecount'] = 0
+	mycontext['message'] = ""
+	
+	#Open the file with IP-addresses
+	ipFile = open('ipaddress.txt', 'r')	
+	mycontext['addresses'] = ipFile.read().split()
+	ipFile.close()
+	
+	if len(callargs) > 1:
+		raise Exception("Too many call arguments")
+
+	# Running remotely (assuming that we pass input argument only remotely):
+	# whenever this vessel gets a connection on its IPaddress:Clearinghouseport it'll call function board
+	elif len(callargs) == 1:
+		port = int(callargs[0])
+		ip = getmyip()
+	
+	# Running locally:
+	# whenever we get a connection on 127.0.0.1:12345 we'll call board
+	else:
+		port = 63165
+		ip = '127.0.0.1'
+	    
+	listencommhandle = waitforconn(ip,port,board)

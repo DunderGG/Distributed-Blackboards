@@ -1,0 +1,287 @@
+# AUTHOR:    David Bennehag    (David.Bennehag@Gmail.com)
+# VERSION:    4.0
+#
+#    DISTRIBUTED SYSTEMS (MPCSN, Chalmers University of Technology)
+#
+#    Changes from V3.0:
+#    * We removed the leader election and are instead going to make use of Eventual Redundancy
+#    
+#    * Changed from showing the local runtimes to showing the value of the logical clock in the message
+#
+#    TODO: 
+#    * 
+#
+
+    
+# Add a new message to our messagelist
+def updateMsgList(lastMessage):
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Entered function updateMsgList()***\n\n"
+    
+    if lastMessage == '':
+        return
+    
+    mycontext['msgList'].append((mycontext['logClock'], lastMessage))
+    if mycontext['reporting']:
+        print "Appended value to msgList: " + lastMessage + "\n"  
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Exited function updateMsgList()***\n\n"
+
+
+### A function that receives the information to show and
+### then builds the HTML to send back to the browser.
+### INPUT: All the info to be added to the HTML, including the message itself
+### OUTPUT: the HTML string to send
+def buildHTML():
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Entered function buildHTML()***"
+    
+    newMessage = """
+        <html>
+        <head>
+            <meta content="text/html; charset=utf-8" http-equiv="content-type">
+            <title>Blackboard, the greatest</title>
+            <style>
+            body{background-color:teal; font-family: "Comic Sans MS", "Comic Sans", cursive;}
+            
+            </style>
+        </head>
+        <body>
+            <h2> THE Blackboard (your IP: [""" + str(mycontext['vesselAddress']) + """])</h2>
+            <p>My current clock: """ + str(mycontext['logClock']) + """</p>
+            <h3> Logical clocks   &   sender </h3>
+              <p>""" + mycontext['message'] + """</p>
+            <br>
+            <textarea rows="4" cols="50" name="comment" form="usrform"></textarea>
+            <form action="" id="usrform" method="post">
+                <input type="submit">                
+            </form>
+        </body>
+        </html>"""
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Finished function buildHTML()\n\n***"
+        
+    return newMessage
+    
+### END OF FUNCTION buildHTML ###        
+        
+### The primary building block of the program. 
+### Is called every time a TCP connection is made to the local IP and port.
+### It will look at the header and perform different actions depending on what kind of
+### message we received.
+
+
+# When updating the messagelist, we call this function to make sure all agree on a clock value.
+# What happens is that we simply send a tiny message with our current clock value to each node.
+
+
+def updateAllClocks():
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Entered function updateAllClocks()***\n\n"
+    
+    msgToSend = ""
+    msgToSend += "<clockValue>"
+    msgToSend += str(mycontext['logClock'])
+    
+    #mycontext['addresses'] contains a list of all our IP-addresses
+    #We loop through it to connect to all vessels (ourselves excluded)
+    #Then send an update to each vessel
+    for address in mycontext['addresses']:            
+        if address != getmyip():
+            if mycontext['reporting']:
+                print "sending update to: " + address
+                
+            newConn = openconn(address, 63165)
+            newConn.send(msgToSend)
+            newConn.close()
+
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Exited function updateAllClocks()***\n\n"
+
+
+# Gets called by the other nodes
+# as a result of receiving the "<clockValue>" message from the updateAllClocks()-function.
+# Input "otherClock" is the timestamp received in the message
+def compareClocks(otherClock):
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Entered function compareClocks()***\n\n"
+    
+    mycontext['lock'].acquire()
+    
+    if otherClock > mycontext["logClock"]:
+        #Synchronize
+        print "Someone else had a higher clock value, synchronize"
+        mycontext["logClock"] = otherClock
+    
+    mycontext['lock'].release()
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Exited function compareClocks()***\n\n"
+        
+        
+
+def main(ip, port, sockobj, thiscommhandle, listencommhandle):
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Entered function main()***"
+    
+    #httpHeader will contain the string we received in the message coming in on the recently established connection
+    httpHeader = ""
+    
+    try:
+        # Receive the message
+        httpHeader = sockobj.recv(4096)
+    except:
+        print "Problem with socket"  
+    
+    if mycontext['reporting']:
+        print "Received HTTP-message: \n" + httpHeader
+    
+    # React differently depending on the message type: HTTP GET or POST, or some other type of message.
+    if httpHeader.startswith( 'GET' ):
+        #Will initiate a conversation that leads to all clocks getting updated
+        updateAllClocks()
+        
+        #A function that builds the HTML for us, defined above
+        htmlResponse = buildHTML()
+        
+        #Send to the client, the HTML that was requested
+        sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+        "Content-length: %i\r\n\r\n%s" % (len(htmlResponse), htmlResponse))
+        #The socket is closed at the end of the function!
+        
+    elif httpHeader.startswith( 'POST' ):
+        
+        #Prevent the user from just printing empty lines by checking that the message is not empty
+        if httpHeader.split('comment=').pop() != "":
+            
+            #Add a tag to the start of each new message to easily identify it later
+            mycontext['message'] += "<StartOfMsg>"
+            
+            #Add some control data to each message
+            mycontext['message'] += "<" + str(mycontext['logClock']) + "> " + str(getmyip()) + ":\t "
+            
+            #Get the message contained in the header. Split the long string when we find the comment,
+            # and then take the second string in the resulting list, which is our message as the comment
+            # always comes last in the header
+            newMsg = httpHeader.split('comment=').pop()
+            newMsg = newMsg.replace("+", " ")
+            newMsg = newMsg.replace("%0D", "")
+            newMsg = newMsg.replace("%0A", "")
+            mycontext['message'] += newMsg
+            
+            #Add a newline to prevent it all from ending up on one line in the html source code
+            mycontext['message'] += "\n"
+            
+            #Add a break-tag to get each message on a new line
+            mycontext['message'] += "<br />"
+        
+        #Only send the latest message
+        msgToPost = mycontext['message'].split('<StartOfMsg>').pop()
+        
+        #mycontext['addresses'] contains a list of all our IP-addresses
+        #We loop through it to connect to all vessels (ourselves excluded)
+        #Then send an update to each vessel
+        for address in mycontext['addresses']:            
+            if address != getmyip():
+                if mycontext['reporting']:
+                    print "sending update to: " + address
+                    
+                newConn = openconn(address, 63165)
+                newConn.send(msgToPost)
+                newConn.close()
+        
+        updateMsgList(msgToPost)
+        updateLogClock("")
+        
+        #A function that builds the HTML for us, defined above
+        htmlResponse = buildHTML()
+        
+        #Send to the client, the HTML that was updated
+        sockobj.send("HTTP/1.1 200 OK\r\nContent-type: text/html\r\n" + \
+        "Content-length: %i\r\n\r\n%s" % (len(htmlResponse), htmlResponse))
+        #The socket is closed at the end of the function!
+    
+    elif httpHeader.startswith('<clockValue>'):
+        otherClock = int(httpHeader.replace("<clockValue>", ""))
+        compareClocks(otherClock)
+    
+    #We received an update from one of the other vessels
+    else:        
+        updateMsgList(httpHeader)
+        updateLogClock(httpHeader)        
+        
+        #Update our message
+        mycontext['message'] += httpHeader
+    
+    #We close the socket that was passed in
+    sockobj.close()
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***Finished function main()\n\n***"
+
+   
+#
+#
+#    CODE STARTS HERE
+#
+# INITIALIZATION    
+if callfunc == 'initialize':
+    #Set to false to disable reporting of runtimes and other info
+    mycontext['reporting'] = False
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***STARTING initialization***"
+    
+    #Create a lock to be used for Mutual Exclusion.
+    #Before altering global variables, we want to acquire() a lock.
+    mycontext['lock'] = getlock()
+    
+    #One big string containing all messages put together
+    mycontext['message'] = ""
+    #The list containing messages. Contains tuples with timestamps and messages.
+    mycontext['msgList'] = []
+    
+    #Contains the vessels IP-address
+    mycontext['vesselAddress'] = getmyip()
+    
+    #Will be our logical clock that is updated for every message
+    mycontext['logClock'] = 0
+    
+    #Open() the file with IP-addresses, remember to close() when finished
+    ipFile = open('ipaddress.txt', 'r')
+    #We read() the file and split() the lines up into separate entries, returning a list of addresses
+    mycontext['addresses'] = ipFile.read().split()
+    ipFile.close()  
+    
+    if len(callargs) > 1:
+        raise Exception("Too many call arguments")
+    
+    # Running remotely (assuming that we pass input argument only remotely):
+    # whenever this vessel gets a connection on its IPaddress:Clearinghouseport it'll call function main
+    elif len(callargs) == 1:
+        mycontext['port'] = int(callargs[0])
+        ip = mycontext['vesselAddress']    
+     
+    else:
+        mycontext['port'] = 63165
+        ip = mycontext['vesselAddress']
+    
+    
+    #call function main() whenever we receive a TCP connection
+    waitforconn(mycontext['vesselAddress'], mycontext['port'], main)
+    
+    if mycontext['reporting']:
+        print "At <" + str(getruntime()) + "> ***FINISHED initialization***\n\n"
+    
+    
+    #Wait for all vessels to get ready, some appear to be really slow...
+    #sleep(5)
+    
+    
+    
+    
+
+        
+    
